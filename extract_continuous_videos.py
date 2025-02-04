@@ -21,13 +21,13 @@ def local_clip(filename, start_time, duration, output_filename, output_directory
         output = subprocess.check_output(command, shell=True,
                                          stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError as err:
-        print err.output
+        print (err.output)
         return err.output
 
 
 def wrapper(clip):
-    input_directory = '/'
-    output_directory = '/'
+    input_directory = './videos'
+    output_directory = './continuous_videos'
     duration = clip['end']-clip['start']
     filename = clip['url'].split('=')[-1]
     local_clip(os.path.join(input_directory,filename+'.mkv'), clip['start'], duration, clip['clip_name']+'.mp4', output_directory)

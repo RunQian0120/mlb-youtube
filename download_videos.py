@@ -1,19 +1,39 @@
 import os
 import json
-import string
-import random
 import subprocess
 
+# Set the directory where you want to save the videos
+save_dir = './videos'
 
-save_dir = '/'
-with open('data/mlb-youtube-segmented.json', 'r') as f:
+# Load the JSON data
+with open('data/mlb-youtube-segmented-subset.json', 'r') as f:
     data = json.load(f)
-    for entry in data:
-        yturl = entry['url']
-        ytid = yturl.split('=')[-1]
 
-        if os.path.exists(os.path.join(save_dir, ytid+'.mkv')):
-            continue
+# Iterate through each entry in the dataset
+total_urls = set()
+for video_id, entry in data.items():
+    yturl = entry['url']
+    # total_urls.add(yturl)
+    ytid = yturl.split('=')[-1]
+    output_path = os.path.join(save_dir, f"{ytid}.mkv")
 
-        cmd = 'youtube-dl -f mkv '+yturl+' -o '+os.path.join(ytid+'.mkv')
-        os.system(cmd)
+    # Skip if the file already exists
+    if os.path.exists(output_path):
+        print(f"Skipping {ytid}, already downloaded.")
+        continue
+
+    # yt-dlp command
+    cmd = [
+        'yt-dlp',
+        '-f', 'bv*+ba/best',  # Selects best video + best audio
+        '-o', output_path,    # Output file path
+        yturl
+    ]
+
+    try:
+        subprocess.run(cmd, check=True)
+        print(f"Downloaded {ytid} successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to download {ytid}: {e}")
+
+# print(len(total_urls))

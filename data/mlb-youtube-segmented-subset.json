@@ -1,0 +1,13 @@
+{
+    "E40GRXPSLG7N": {
+        "subset": "training",
+        "end": 8441.408267985897,
+        "url": "https://www.youtube.com/watch?v=RHlEdXq2DuI",
+        "type": "slider",
+        "labels": [
+            "strike"
+        ],
+        "start": 8434.408267985897,
+        "speed": 85.9
+    }
+}
