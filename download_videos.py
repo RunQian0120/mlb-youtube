@@ -6,7 +6,7 @@ import subprocess
 save_dir = './videos'
 
 # Load the JSON data
-with open('data/mlb-youtube-segmented-subset.json', 'r') as f:
+with open('data/mlb-youtube-segmented.json', 'r') as f:
     data = json.load(f)
 
 # Iterate through each entry in the dataset
