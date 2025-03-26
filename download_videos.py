@@ -32,6 +32,7 @@ for ytid, yturl in all_ytid.items():
     # yt-dlp command
     cmd = [
         'yt-dlp',
+        '--cookies', 'youtube_cookies.txt',
         '-f', 'bv*+ba/best',  # Selects best video + best audio
         '-o', output_path,    # Output file path
         yturl
