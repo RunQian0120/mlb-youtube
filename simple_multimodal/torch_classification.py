@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 import torchvision.transforms as transforms
 from PIL import Image
 from process_data import create_all_data, all_labels
@@ -10,6 +10,8 @@ import time
 from tqdm import tqdm
 import nltk
 from collections import Counter
+import matplotlib.pyplot as plt
+from sklearn.metrics import precision_score, f1_score 
 
 nltk.download('punkt_tab')
 
@@ -25,23 +27,31 @@ def build_vocab(captions, vocab_size=5000):
 class VideoCNN(nn.Module):
     def __init__(self):
         super(VideoCNN, self).__init__()
-        self.conv3d_1 = nn.Conv3d(3, 16, kernel_size=(3, 3, 3), stride=1, padding=1)
-        self.conv3d_2 = nn.Conv3d(16, 32, kernel_size=(3, 3, 3), stride=1, padding=1)
-        self.conv3d_3 = nn.Conv3d(32, 64, kernel_size=(3, 3, 3), stride=1, padding=1)
-        self.pool = nn.MaxPool3d((2, 2, 2))
-        self.global_avg_pool = nn.AdaptiveAvgPool3d((4, 4, 4))  # Ensures a fixed-size output
-        self.fc = nn.Linear(64 * 4 * 4 * 4, 256)  # Adjust shape based on input size
-    
+        self.convs = nn.ModuleList([
+            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1) 
+            for _ in range(4)
+        ])
+        self.pool = nn.MaxPool2d(2)
+        self.fc = nn.Linear(16*4*32*32, 256)
+
     def forward(self, x):
-        x = F.relu(self.conv3d_1(x))
-        x = self.pool(x)
-        x = F.relu(self.conv3d_2(x))
-        x = self.pool(x)
-        x = F.relu(self.conv3d_3(x))
-        x = self.global_avg_pool(x)
-        x = torch.flatten(x, start_dim=1)
-        x = self.fc(x)
-        return x
+        per_frame_features = []
+        for i, conv in enumerate(self.convs):
+            frame_i = x[:, :, i, :, :]
+            out_i = F.relu(conv(frame_i))
+            out_i = self.pool(out_i)
+            per_frame_features.append(out_i)
+        
+        merged = torch.cat(per_frame_features, dim=1)
+        merged = merged.view(merged.size(0), -1)
+        merged = self.fc(merged)
+        return merged
+
+    def get_weight_norms(self):
+        norms = []
+        for conv in self.convs:
+            norms.append(conv.weight.norm().item())
+        return norms
 
 class CaptionLSTM(nn.Module):
     def __init__(self, vocab_size, embed_dim, hidden_dim, num_layers):
@@ -57,16 +67,18 @@ class CaptionLSTM(nn.Module):
         return x
 
 class VideoCaptionClassifier(nn.Module):
-    def __init__(self, vocab_size, embed_dim=128, hidden_dim=256, num_layers=2, num_classes=3):
+    def __init__(self, vocab_size, embed_dim=128, hidden_dim=256, num_layers=2, num_classes=3, dropout_rate=0.4):
         super(VideoCaptionClassifier, self).__init__()
         self.video_model = VideoCNN()
         self.caption_model = CaptionLSTM(vocab_size, embed_dim, hidden_dim, num_layers)
+        self.dropout = nn.Dropout(dropout_rate)
         self.fc = nn.Linear(512, num_classes)
     
     def forward(self, video, caption):
         video_features = self.video_model(video)
         caption_features = self.caption_model(caption)
         combined = torch.cat((video_features, caption_features), dim=1)
+        combined = self.dropout(combined)
         output = self.fc(combined)
         return output
 
@@ -97,29 +109,85 @@ all_data = create_all_data()
 captions = [item["caption"] for item in all_data]
 vocab = build_vocab(captions)
 
-# Training and Testing
 transform = transforms.Compose([
     transforms.Resize((64, 64)),
     transforms.ToTensor()
 ])
 
 dataset = BaseballDataset(all_data, vocab, transform=transform)
-dataloader = DataLoader(dataset, batch_size=8, shuffle=True, collate_fn=lambda batch: (torch.stack([x[0] for x in batch]), nn.utils.rnn.pad_sequence([x[1] for x in batch], batch_first=True), torch.tensor([x[2] for x in batch])))
+train_size = int(0.8 * len(dataset))
+test_size = len(dataset) - train_size
+
+train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+train_dataloader = DataLoader(
+    train_dataset, batch_size=8, shuffle=True, 
+    collate_fn=lambda batch: (
+        torch.stack([x[0] for x in batch]), 
+        nn.utils.rnn.pad_sequence([x[1] for x in batch], batch_first=True), 
+        torch.tensor([x[2] for x in batch])
+    )
+)
+
+test_dataloader = DataLoader(
+    test_dataset, batch_size=8, shuffle=False, 
+    collate_fn=lambda batch: (
+        torch.stack([x[0] for x in batch]), 
+        nn.utils.rnn.pad_sequence([x[1] for x in batch], batch_first=True), 
+        torch.tensor([x[2] for x in batch])
+    )
+)
 
 model = VideoCaptionClassifier(vocab_size=len(vocab), num_classes=len(all_labels))
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
 
-def train(model, dataloader, criterion, optimizer, epochs=10):
-    model.train()
-    losses = []
-    accus = []
+def evaluate(model, dataloader, criterion):
+    model.eval()
+    correct = 0
+    total = 0
+    total_loss = 0
+    all_preds = []
+    all_labels_list = []
+    with torch.no_grad():
+        for video, caption, label in dataloader:
+            output = model(video, caption)
+            loss = criterion(output, label)
+            total_loss += loss.item()
+            predictions = torch.argmax(output, dim=1)
+            correct += (predictions == label).sum().item()
+            total += label.size(0)
+            all_preds.extend(predictions.cpu().numpy())
+            all_labels_list.extend(label.cpu().numpy())
+    accuracy = correct / total
+    avg_loss = total_loss / len(dataloader)
+    precision = precision_score(all_labels_list, all_preds, average='macro', zero_division=0)
+    f1 = f1_score(all_labels_list, all_preds, average='macro', zero_division=0)
+    return avg_loss, accuracy, precision, f1
+
+def train(model, train_dataset, test_dataloader, criterion, optimizer, epochs=15, batch_size=8):
+    train_losses, test_losses = [], []
+    train_accuracies, test_accuracies = [], []
+    test_precisions, test_f1_scores = [], []
+    
+    weight_norms_history = []
+    
     for epoch in range(epochs):
         start_time = time.time()
         total_loss = 0
         correct = 0
         total = 0
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}", leave=True)
+        
+        train_dataloader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True,
+            collate_fn=lambda batch: (
+                torch.stack([x[0] for x in batch]), 
+                nn.utils.rnn.pad_sequence([x[1] for x in batch], batch_first=True), 
+                torch.tensor([x[2] for x in batch])
+            )
+        )
+        
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}", leave=True)
+        model.train()
         
         for video, caption, label in progress_bar:
             optimizer.zero_grad()
@@ -135,14 +203,73 @@ def train(model, dataloader, criterion, optimizer, epochs=10):
             
             progress_bar.set_postfix(loss=loss.item())
         
-        accuracy = correct / total * 100
+        train_loss = total_loss / len(train_dataloader)
+        train_accuracy = correct / total
+        
+        test_loss, test_accuracy, test_precision, test_f1 = evaluate(model, test_dataloader, criterion)
+        
+        train_losses.append(train_loss)
+        test_losses.append(test_loss)
+        train_accuracies.append(train_accuracy)
+        test_accuracies.append(test_accuracy)
+        test_precisions.append(test_precision)
+        test_f1_scores.append(test_f1)
+        
+        frame_weight_norms = model.video_model.get_weight_norms()
+        weight_norms_history.append(frame_weight_norms)
+        
         epoch_time = time.time() - start_time
-        losses.append(total_loss / len(dataloader))
-        accus.append(accuracy)
-        print(f"Epoch {epoch+1} completed in {epoch_time:.2f}s, Loss: {total_loss / len(dataloader)}, Accuracy: {accuracy:.2f}%")
+        print(f"Epoch {epoch+1} completed in {epoch_time:.2f}s, "
+              f"Train Loss: {train_loss:.4f}, Train Acc: {train_accuracy:.2f}, "
+              f"Test Loss: {test_loss:.4f}, Test Acc: {test_accuracy:.2f}, "
+              f"Test Precision: {test_precision:.2f}, Test F1: {test_f1:.2f}")
+    
+    epochs_range = range(1, epochs + 1)
+    plt.figure(figsize=(16, 10))
+    
+    plt.subplot(2, 2, 1)
+    plt.plot(epochs_range, train_losses, label="Train Loss")
+    plt.plot(epochs_range, test_losses, label="Test Loss")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.title("Loss vs Epoch")
+    plt.legend()
+    
+    plt.subplot(2, 2, 2)
+    plt.plot(epochs_range, train_accuracies, label="Train Accuracy")
+    plt.plot(epochs_range, test_accuracies, label="Test Accuracy")
+    plt.xlabel("Epochs")
+    plt.ylabel("Accuracy")
+    plt.title("Accuracy vs Epoch")
+    plt.legend()
+    
+    plt.subplot(2, 2, 3)
+    plt.plot(epochs_range, test_precisions, label="Test Precision")
+    plt.xlabel("Epochs")
+    plt.ylabel("Precision")
+    plt.title("Precision vs Epoch")
+    plt.legend()
+    
+    plt.subplot(2, 2, 4)
+    plt.plot(epochs_range, test_f1_scores, label="Test F1 Score")
+    plt.xlabel("Epochs")
+    plt.ylabel("F1 Score")
+    plt.title("F1 Score vs Epoch")
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
+    
+    plt.figure(figsize=(8, 5))
+    
+    weight_norms_history = torch.tensor(weight_norms_history) 
+    for frame_idx in range(4):
+        plt.plot(epochs_range, weight_norms_history[:, frame_idx], label=f"Conv2D-F{frame_idx}")
+    
+    plt.xlabel("Epoch")
+    plt.ylabel("Weight Norm (L2)")
+    plt.title("Conv2D Weight Norms per Frame")
+    plt.legend()
+    plt.show()
 
-    print(losses)
-    print(accus)
-
-
-train(model, dataloader, criterion, optimizer)
+train(model, train_dataset, test_dataloader, criterion, optimizer)

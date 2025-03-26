@@ -4,6 +4,9 @@ from PIL import Image
 import io
 import json
 
+USE_CAPTIONS = True
+USE_METADATA = False
+
 all_labels = [
     "Strike", "Ball", "Foul", "Strike out", "Swing and a miss", "Fly out", 
     "Two-base hit", "Ground out", "One-base hit", "Wild pitch", "Homerun", 
@@ -13,12 +16,11 @@ all_labels = [
     "Tag out", "Caught stealing"
 ]
 
+allowed_labels = ["Foul", "Swing and a miss", "Fly out", "Ground out", "Ball", "Strike"]
+
 label_indices = {key: index for index, key in enumerate(all_labels)}
 
 def return_sampled_frames(hdf5_file, dataset_name, start_segment, end_segment, duration, num_samples=4):
-    """
-    Extracts exactly `num_samples` frames from the HDF5 dataset, evenly spaced between `start_idx` and `end_idx`.
-    """
     with h5py.File(hdf5_file, 'r') as f:
         dataset = f[dataset_name]
 
@@ -44,6 +46,7 @@ def create_all_data():
 
     fps = 6
     video_ids = ['20160401HTNC02016', '20160408SSLT02016', '20160503LTHT02016', '20170808LGSS02017']
+    # video_ids = ['20160401HTNC02016', '20160408SSLT02016', '20160503LTHT02016', '20170808LGSS02017', '20170705HTSK02017', '20170705KTOB02017']
     max_annotation_idx = 329  # Adjust as needed
 
     all_data = []
@@ -54,13 +57,20 @@ def create_all_data():
             duration = metadata['database'][video_id]['duration']
 
             file = f"data/{video_id}_jpegs.h5"
-            start_idx = int(d['segment'][0])
-            end_idx = int(d['segment'][1])
+            start_idx = float(d['segment'][0])
+            end_idx = float(d['segment'][1])
 
-            label_idx = label_indices[d["label"]]
-            caption = caption_data[video_id][annotation_idx]['summary']
-            images = return_sampled_frames(file, 'jpegs', start_idx, end_idx, duration)
-            all_data.append({'images': images, 'caption': caption, 'label': label_idx})
+            if d["label"] in allowed_labels:
+                label_idx = label_indices[d["label"]]
+                if USE_CAPTIONS:
+                    caption = caption_data[video_id][annotation_idx]['summary']
+                elif USE_METADATA:
+                    pitch_idx = float(d['pitchTime'])
+                    caption = f"Time from start to pitch is {pitch_idx - start_idx} seconds. Time from pitch to end is {end_idx - pitch_idx} seconds."
+                else:
+                    caption = "Empty Caption"
+                images = return_sampled_frames(file, 'jpegs', start_idx, end_idx, duration)
+                all_data.append({'images': images, 'caption': caption, 'label': label_idx})
     
     return all_data
     
