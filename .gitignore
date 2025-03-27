@@ -1,1 +1,5 @@
 *.mp4
+*/venv/*
+*.pth
+*.h5
+simple_multimodal/data/bbdb.v0.9.with.inning.min.json

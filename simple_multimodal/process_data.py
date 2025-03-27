@@ -45,7 +45,46 @@ def create_all_data():
         caption_data = json.load(file)
 
     fps = 6
-    video_ids = ['20160401HTNC02016', '20160408SSLT02016', '20160503LTHT02016', '20170808LGSS02017']
+    video_ids = ['20160408SSLT02016', '20160503LTHT02016', '20170808LGSS02017']
+    # video_ids = ['20160401HTNC02016']
+    # video_ids = ['20160401HTNC02016', '20160408SSLT02016', '20160503LTHT02016', '20170808LGSS02017', '20170705HTSK02017', '20170705KTOB02017']
+    max_annotation_idx = 329  # Adjust as needed
+
+    all_data = []
+    for video_id in video_ids:
+        for annotation_idx in range(0, max_annotation_idx + 1):
+            d = metadata['database'][video_id]['annotations'][annotation_idx]
+
+            duration = metadata['database'][video_id]['duration']
+
+            file = f"data/{video_id}_jpegs.h5"
+            start_idx = float(d['segment'][0])
+            end_idx = float(d['segment'][1])
+
+            if d["label"] in allowed_labels:
+                label_idx = label_indices[d["label"]]
+                if USE_CAPTIONS:
+                    caption = caption_data[video_id][annotation_idx]['summary']
+                elif USE_METADATA:
+                    pitch_idx = float(d['pitchTime'])
+                    caption = f"Time from start to pitch is {pitch_idx - start_idx} seconds. Time from pitch to end is {end_idx - pitch_idx} seconds."
+                else:
+                    caption = "Empty Caption"
+                images = return_sampled_frames(file, 'jpegs', start_idx, end_idx, duration)
+                all_data.append({'images': images, 'caption': caption, 'label': label_idx})
+    
+    return all_data
+
+def create_test_data():    
+    with open('data/bbdb.v0.9.with.inning.min.json', 'r') as file:
+        metadata = json.load(file)
+
+    with open('data/captions.json') as file:
+        caption_data = json.load(file)
+
+    fps = 6
+    # video_ids = ['20160401HTNC02016', '20160408SSLT02016', '20160503LTHT02016', '20170808LGSS02017']
+    video_ids = ['20160401HTNC02016']
     # video_ids = ['20160401HTNC02016', '20160408SSLT02016', '20160503LTHT02016', '20170808LGSS02017', '20170705HTSK02017', '20170705KTOB02017']
     max_annotation_idx = 329  # Adjust as needed
 

@@ -5,13 +5,14 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 import torchvision.transforms as transforms
 from PIL import Image
-from process_data import create_all_data, all_labels
+from process_data import create_all_data, all_labels, create_test_data
 import time
 from tqdm import tqdm
 import nltk
 from collections import Counter
 import matplotlib.pyplot as plt
 from sklearn.metrics import precision_score, f1_score 
+import os
 
 nltk.download('punkt_tab')
 
@@ -106,15 +107,23 @@ class BaseballDataset(Dataset):
         return video_tensor, caption_tensor, torch.tensor(label, dtype=torch.long)
 
 all_data = create_all_data()
+test_data = create_test_data()
 captions = [item["caption"] for item in all_data]
-vocab = build_vocab(captions)
+test_captions = [item["caption"] for item in test_data]
+vocab = build_vocab(captions + test_captions)
 
 transform = transforms.Compose([
     transforms.Resize((64, 64)),
     transforms.ToTensor()
 ])
 
+test_transforms = transforms.Compose([
+    transforms.ToTensor()
+])
+
 dataset = BaseballDataset(all_data, vocab, transform=transform)
+test_dataset_real = BaseballDataset(test_data, vocab, transform=transform)
+test_dataset_notransform = BaseballDataset(test_data, vocab, transform=test_transforms)
 train_size = int(0.8 * len(dataset))
 test_size = len(dataset) - train_size
 
@@ -128,11 +137,20 @@ train_dataloader = DataLoader(
     )
 )
 
-test_dataloader = DataLoader(
+val_dataloader = DataLoader(
     test_dataset, batch_size=8, shuffle=False, 
     collate_fn=lambda batch: (
         torch.stack([x[0] for x in batch]), 
         nn.utils.rnn.pad_sequence([x[1] for x in batch], batch_first=True), 
+        torch.tensor([x[2] for x in batch])
+    )
+)
+
+test_dataloader = DataLoader(
+    test_dataset_real, batch_size=8, shuffle=False,
+    collate_fn=lambda batch: (
+        torch.stack([x[0] for x in batch]),
+        nn.utils.rnn.pad_sequence([x[1] for x in batch], batch_first=True),
         torch.tensor([x[2] for x in batch])
     )
 )
@@ -163,6 +181,69 @@ def evaluate(model, dataloader, criterion):
     precision = precision_score(all_labels_list, all_preds, average='macro', zero_division=0)
     f1 = f1_score(all_labels_list, all_preds, average='macro', zero_division=0)
     return avg_loss, accuracy, precision, f1
+
+def visualize_prediction(model, test_dataset, test_dataset_no_transform, idx):
+    """
+    Visualize and predict the outcome for a single baseball pitch at a given index.
+    
+    Args:
+        model: Trained model to use for prediction
+        test_dataset: Test dataset containing the samples
+        idx: Index of the sample in the test dataset to visualize
+    """
+    model.eval()
+    
+    # Get the sample at the specified index
+    sample = test_dataset[idx]
+    video, caption, label = sample
+    
+    # Add batch dimension for model input
+    video_batch = video.unsqueeze(0)
+    caption_batch = caption.unsqueeze(0)
+    
+    # Get model prediction
+    with torch.no_grad():
+        output = model(video_batch, caption_batch)
+        probabilities = F.softmax(output, dim=1)
+        pred_idx = torch.argmax(output, dim=1).item()
+
+    sample_no_transform = test_dataset_no_transform[idx]
+    video_no_transform, caption_no_transform, label_no_transform = sample_no_transform
+    
+    # Convert video tensor to displayable images
+    frames = []
+    for i in range(4):
+        # Convert tensor to PIL image for display
+        frame = video_no_transform[:, i, :, :]
+        frame = frame.permute(1, 2, 0)  # Change from CxHxW to HxWxC
+        frames.append(frame.numpy())
+    
+    # Get text labels
+    pred_label = all_labels[pred_idx]
+    true_label = all_labels[label.item()]
+    
+    # Extract tokens from caption tensor
+    inv_vocab = {idx: word for word, idx in vocab.items()}
+    caption_words = [inv_vocab.get(idx.item(), "<unk>") for idx in caption]
+    caption_text = " ".join(caption_words)
+    
+    # Display results
+    print(f"Caption: {caption_text}")
+    print(f"True outcome: {true_label}")
+    print(f"Predicted outcome: {pred_label}")
+    print(f"Prediction confidence: {probabilities[0][pred_idx]:.4f}")
+    
+    # Display the video frames
+    fig, axes = plt.subplots(1, 4, figsize=(15, 4))
+    for i, ax in enumerate(axes):
+        ax.imshow(frames[i])
+        ax.set_title(f"Frame {i+1}")
+        ax.axis('off')
+    
+    plt.suptitle(f"Prediction: {pred_label} (True: {true_label})")
+    plt.tight_layout()
+    plt.show()
+
 
 def train(model, train_dataset, test_dataloader, criterion, optimizer, epochs=15, batch_size=8):
     train_losses, test_losses = [], []
@@ -272,4 +353,26 @@ def train(model, train_dataset, test_dataloader, criterion, optimizer, epochs=15
     plt.legend()
     plt.show()
 
-train(model, train_dataset, test_dataloader, criterion, optimizer)
+def train_or_load_model(model, train_dataset, test_dataloader, criterion, optimizer, epochs=15, batch_size=8, model_path="model_weights.pth"):
+    """Train the model or load from cache if available"""
+    # Check if model weights exist
+    if os.path.exists(model_path):
+        print(f"Loading model weights from {model_path}")
+        model.load_state_dict(torch.load(model_path))
+        # Evaluate the loaded model
+        test_loss, test_accuracy, test_precision, test_f1 = evaluate(model, test_dataloader, criterion)
+        print(f"Loaded model - Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}, "
+                f"Test Precision: {test_precision:.2f}, Test F1: {test_f1:.2f}")
+        return model
+    
+    # If no cached weights, train the model
+    print(f"No cached weights found at {model_path}. Training model...")
+    train(model, train_dataset, test_dataloader, criterion, optimizer, epochs, batch_size)
+    
+    # Save the model weights
+    print(f"Saving model weights to {model_path}")
+    torch.save(model.state_dict(), model_path)
+    return model
+
+train_or_load_model(model, train_dataset, test_dataloader, criterion, optimizer)
+visualize_prediction(model, test_dataset_real, test_dataset_notransform, 5)
